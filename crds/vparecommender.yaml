@@ -29,6 +29,10 @@ spec:
                 gitPath:
                   type: string
                   description: "Path within the git repository where patches should be stored"
+                baseBranch:
+                  type: string
+                  description: "Base branch for pull requests (defaults to main)"
+                  default: "main"
                 targetResource:
                   type: object
                   description: "Resource that will be patched"
@@ -62,10 +66,26 @@ spec:
                       type: string
                     memory:
                       type: string
-                lastPRUrl:
-                  type: string
-                lastSuccessfulRunTime:
-                  type: string
+                lastPatch:
+                  type: object
+                  properties:
+                    time:
+                      type: string
+                    path:
+                      type: string
+                    target:
+                      type: string
+                pullRequest:
+                  type: object
+                  properties:
+                    url:
+                      type: string
+                    number:
+                      type: integer
+                    created_at:
+                      type: string
+                    commits:
+                      type: integer
                 conditions:
                   type: array
                   items:

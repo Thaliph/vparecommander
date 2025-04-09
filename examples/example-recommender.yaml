@@ -5,9 +5,8 @@ metadata:
   namespace: vpa-recommender
 type: Opaque
 data:
-  # Fixed token without newlines
+  # Replace with your actual token
   token: TOKEN
-
 ---
 apiVersion: recommander.k8s.io/v1
 kind: VPARecommender
@@ -15,13 +14,13 @@ metadata:
   name: example-recommender
   namespace: vpa-recommender
 spec:
-  vpaName: example-app-vpa  # Updated to match the VPA name
+  vpaName: example-app-vpa
   vpaNamespace: default
   gitRepo: "https://github.com/Thaliph/vparecommander.git"
   gitPath: "examples/kustomize-example"
   targetResource:
     kind: Deployment
-    name: example-app  # Updated to match the deployment name
+    name: example-app
     namespace: default
     containerIndex: 0
   secretRef: git-credentials

@@ -6,10 +6,13 @@ This is a Kubernetes operator built with [Kopf](https://github.com/nolar/kopf) t
 
 - Retrieves resource recommendations from VPA resources
 - Automatically creates patches for CPU and memory requests/limits
-- Creates pull requests to your Git repository with the recommended changes
+- Creates standardized patch files named `<resource-name>.<resource-kind>.yaml`
+- Uses a consistent branch (`vpar/proposition`) for all recommendations
+- Creates a pull request only if none exists from the branch to main
+- Updates existing patches if they already exist
 - Uses Kustomize-compatible patch format
 - Can be scheduled to run periodically
-- Stores recommendation history in the CRD status
+- Stores detailed status information in the CRD including PR details
 
 ## Prerequisites
 
@@ -71,6 +74,7 @@ spec:
   vpaNamespace: default
   gitRepo: "https://github.com/yourorg/your-repo.git"
   gitPath: "kustomize-configs"
+  baseBranch: "main"  # Optional, defaults to main
   targetResource:
     kind: Deployment
     name: my-app
@@ -79,7 +83,7 @@ spec:
   secretRef: git-credentials
 ```
 
-3. The operator will create a pull request with patches like:
+3. The operator will create or update a patch file named `my-app.deployment.yaml` with patches like:
 
 ```yaml
 - op: add
@@ -88,6 +92,42 @@ spec:
 - op: add
   path: "/spec/template/spec/containers/0/resources/limits/cpu" 
   value: 600m
+```
+
+4. Check the status of the VPARecommender:
+
+```bash
+kubectl -n vpa-recommender get vparecommenders example-recommender -o jsonpath='{.status}'
+```
+
+Example output:
+```json
+{
+  "conditions": [
+    {
+      "lastTransitionTime": "2025-04-10T12:34:56.789Z",
+      "message": "Successfully created/updated patch and created PR",
+      "reason": "PatchCreated",
+      "status": "True",
+      "type": "Recommended"
+    }
+  ],
+  "lastPatch": {
+    "path": "my-app.deployment.yaml",
+    "target": "Deployment/my-app",
+    "time": "2025-04-10T12:34:56.789Z"
+  },
+  "lastRecommendation": {
+    "cpu": "250m",
+    "memory": "512Mi"
+  },
+  "pullRequest": {
+    "commits": 3,
+    "created_at": "2025-04-08T15:22:47Z",
+    "number": 42,
+    "url": "https://github.com/yourorg/your-repo/pull/42"
+  }
+}
 ```
 
 ## Local Development

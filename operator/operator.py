@@ -10,7 +10,8 @@ import json
 from datetime import datetime
 import subprocess
 import logging
-from typing import Dict, Any
+import re
+from typing import Dict, Any, Tuple, List, Optional
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +35,7 @@ def git_clone(repo_url: str, auth_token: str, branch: str = "main") -> str:
     
     try:
         logger.info(f"Cloning repository {repo_url}...")
-        # Try without specifying branch first (in case branch doesn't exist)
+        # Clone the default branch first
         subprocess.run(
             ["git", "clone", auth_url, repo_dir],
             check=True, 
@@ -42,17 +43,6 @@ def git_clone(repo_url: str, auth_token: str, branch: str = "main") -> str:
             stderr=subprocess.PIPE
         )
         
-        # Then checkout the specified branch if it exists
-        try:
-            subprocess.run(
-                ["git", "-C", repo_dir, "checkout", branch],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-        except subprocess.CalledProcessError:
-            logger.warning(f"Branch {branch} not found, using default branch")
-            
         logger.info(f"Successfully cloned repository {repo_url}")
         return repo_dir
     except subprocess.CalledProcessError as e:
@@ -60,32 +50,69 @@ def git_clone(repo_url: str, auth_token: str, branch: str = "main") -> str:
         logger.error(f"Failed to clone repository: {e}, Error output: {error_output}")
         raise kopf.PermanentError(f"Failed to clone git repository: {e}")
 
-def create_branch(repo_dir: str, branch_name: str) -> None:
-    """Create a new branch in the repository."""
+def check_branch_exists(repo_dir: str, branch_name: str) -> bool:
+    """Check if a branch exists locally or remotely."""
     try:
+        # Fetch all branches including remote ones
         subprocess.run(
-            ["git", "-C", repo_dir, "checkout", "-b", branch_name],
+            ["git", "-C", repo_dir, "fetch", "--all"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
-        logger.info(f"Created branch {branch_name}")
+        
+        # Check if branch exists
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "ls-remote", "--heads", "origin", branch_name],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # If output contains the branch name, it exists
+        return len(result.stdout) > 0
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to create branch: {e}")
-        raise kopf.PermanentError(f"Failed to create git branch: {e}")
+        logger.warning(f"Error checking branch existence: {e}")
+        return False
 
-def create_patch_file(repo_dir: str, git_path: str, target_resource: Dict[str, Any], resources: Dict[str, str]) -> str:
-    """Create the patch file in the repository."""
+def create_or_checkout_branch(repo_dir: str, branch_name: str) -> None:
+    """Create a new branch or checkout existing one in the repository."""
+    try:
+        if check_branch_exists(repo_dir, branch_name):
+            # Checkout existing branch
+            subprocess.run(
+                ["git", "-C", repo_dir, "checkout", "-B", branch_name, f"origin/{branch_name}"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            logger.info(f"Checked out existing branch {branch_name}")
+        else:
+            # Create new branch
+            subprocess.run(
+                ["git", "-C", repo_dir, "checkout", "-b", branch_name],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            logger.info(f"Created new branch {branch_name}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to create/checkout branch: {e}")
+        raise kopf.PermanentError(f"Failed to create/checkout git branch: {e}")
+
+def create_patch_file(repo_dir: str, git_path: str, target_resource: Dict[str, Any], 
+                    resources: Dict[str, str]) -> str:
+    """Create the patch file in the repository with specific naming format."""
     # Ensure the patches directory exists
     patch_dir = os.path.join(repo_dir, git_path, "patches")
     os.makedirs(patch_dir, exist_ok=True)
     
-    # Generate a unique filename based on the target resource and timestamp
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    # Use the target resource name and kind for the filename
     kind = target_resource.get('kind', '').lower()
     name = target_resource.get('name', '').lower()
-    namespace = target_resource.get('namespace', 'default').lower()
-    patch_file = os.path.join(patch_dir, f"{timestamp}-{namespace}-{kind}-{name}.yaml")
+    
+    # Create the filename: <name-of-deployment>.<kind-of-resource>.yaml
+    patch_file = os.path.join(patch_dir, f"{name}.{kind}.yaml")
     
     container_index = target_resource.get('containerIndex', 0)
     
@@ -120,7 +147,7 @@ def create_patch_file(repo_dir: str, git_path: str, target_resource: Dict[str, A
     with open(patch_file, 'w') as f:
         yaml.dump(patches, f)
     
-    logger.info(f"Created patch file at {patch_file}")
+    logger.info(f"Created/Updated patch file at {patch_file}")
     return patch_file
 
 def git_commit_and_push(repo_dir: str, branch_name: str, commit_message: str) -> None:
@@ -149,6 +176,18 @@ def git_commit_and_push(repo_dir: str, branch_name: str, commit_message: str) ->
             stderr=subprocess.PIPE
         )
         
+        # Check if there are changes to commit
+        status_result = subprocess.run(
+            ["git", "-C", repo_dir, "status", "--porcelain"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        if not status_result.stdout:
+            logger.info("No changes to commit")
+            return
+        
         # Commit changes
         subprocess.run(
             ["git", "-C", repo_dir, "commit", "-m", commit_message],
@@ -157,9 +196,9 @@ def git_commit_and_push(repo_dir: str, branch_name: str, commit_message: str) ->
             stderr=subprocess.PIPE
         )
         
-        # Push changes to create the PR branch
+        # Push changes to create or update the PR branch
         subprocess.run(
-            ["git", "-C", repo_dir, "push", "origin", branch_name],
+            ["git", "-C", repo_dir, "push", "-f", "origin", branch_name],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
@@ -167,12 +206,100 @@ def git_commit_and_push(repo_dir: str, branch_name: str, commit_message: str) ->
         
         logger.info(f"Successfully committed and pushed changes on branch {branch_name}")
     except subprocess.CalledProcessError as e:
-        logger.error(f"Git operation failed: {e}")
+        error_output = e.stderr.decode('utf-8') if e.stderr else "No error output"
+        logger.error(f"Git operation failed: {e}, Error output: {error_output}")
         raise kopf.PermanentError(f"Git operation failed: {e}")
 
-def create_pull_request(repo_dir: str, repo_url: str, branch_name: str, auth_token: str, 
-                      title: str, body: str) -> str:
-    """Create a pull request using the GitHub CLI or API."""
+def check_pull_request_exists(repo_url: str, branch_name: str, base_branch: str, auth_token: str) -> Tuple[bool, Optional[dict]]:
+    """Check if a pull request exists from the branch to the base branch."""
+    # Extract the repo owner and name from the URL
+    parts = repo_url.rstrip('.git').split('/')
+    repo_owner = parts[-2]
+    repo_name = parts[-1]
+    
+    # Use GitHub API to list pull requests
+    api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls?head={repo_owner}:{branch_name}&base={base_branch}&state=open"
+    
+    try:
+        result = subprocess.run(
+            [
+                "curl", "-s", "-X", "GET", 
+                "-H", f"Authorization: token {auth_token}",
+                "-H", "Accept: application/vnd.github.v3+json",
+                api_url
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        response = json.loads(result.stdout)
+        
+        if response and len(response) > 0:  # Fixed: replaced && with 'and'
+            pr_data = {
+                'number': response[0]['number'],
+                'url': response[0]['html_url'],
+                'created_at': response[0]['created_at'],
+            }
+            return True, pr_data
+        return False, None
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        logger.error(f"Failed to check for pull requests: {e}")
+        return False, None
+
+def get_commit_count(repo_url: str, branch_name: str, auth_token: str) -> int:
+    """Get the number of commits on a branch."""
+    # Extract the repo owner and name from the URL
+    parts = repo_url.rstrip('.git').split('/')
+    repo_owner = parts[-2]
+    repo_name = parts[-1]
+    
+    # Use GitHub API to get branch info
+    api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/branches/{branch_name}"
+    
+    try:
+        result = subprocess.run(
+            [
+                "curl", "-s", "-X", "GET", 
+                "-H", f"Authorization: token {auth_token}",
+                "-H", "Accept: application/vnd.github.v3+json",
+                api_url
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        response = json.loads(result.stdout)
+        
+        # Get commit SHA
+        commit_sha = response.get('commit', {}).get('sha', '')
+        if not commit_sha:
+            return 0
+            
+        # Get commit count
+        count_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/commits?sha={commit_sha}"
+        count_result = subprocess.run(
+            [
+                "curl", "-s", "-X", "GET", 
+                "-H", f"Authorization: token {auth_token}",
+                "-H", "Accept: application/vnd.github.v3+json",
+                count_url
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        count_response = json.loads(count_result.stdout)
+        return len(count_response)
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        logger.error(f"Failed to get commit count: {e}")
+        return 0
+
+def create_pull_request(repo_url: str, branch_name: str, base_branch: str, auth_token: str, 
+                      title: str, body: str) -> Dict[str, Any]:
+    """Create a pull request using the GitHub API."""
     # Extract the repo owner and name from the URL
     parts = repo_url.rstrip('.git').split('/')
     repo_owner = parts[-2]
@@ -184,7 +311,7 @@ def create_pull_request(repo_dir: str, repo_url: str, branch_name: str, auth_tok
         "title": title,
         "body": body,
         "head": branch_name,
-        "base": "main"  # Target the main branch
+        "base": base_branch
     }
     
     try:
@@ -203,13 +330,21 @@ def create_pull_request(repo_dir: str, repo_url: str, branch_name: str, auth_tok
         
         response = json.loads(result.stdout)
         pr_url = response.get("html_url")
+        pr_number = response.get("number")
+        pr_created_at = response.get("created_at")
+        
         logger.info(f"Created pull request: {pr_url}")
-        return pr_url
+        
+        return {
+            "url": pr_url,
+            "number": pr_number,
+            "created_at": pr_created_at
+        }
     except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
-        logger.error(f"Failed to create pull request: {e}")
+        error_output = e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else "No error output"
+        logger.error(f"Failed to create pull request: {e}, Error: {error_output}")
         raise kopf.PermanentError(f"Failed to create pull request: {e}")
 
-# Add error handling for missing VPA resources
 def get_vpa_recommendation(name: str, namespace: str) -> Dict[str, str]:
     """Get recommendations from a VPA resource."""
     api = kubernetes.client.CustomObjectsApi()
@@ -266,6 +401,10 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
     git_path = spec.get('gitPath')
     target_resource = spec.get('targetResource', {})
     secret_name = spec.get('secretRef')
+    base_branch = spec.get('baseBranch', 'main')  # Default to 'main' if not specified
+    
+    # Use a fixed branch name for VPA recommendations
+    branch_name = "vpar/proposition"
     
     # Get the git authentication token from the secret
     core_v1_api = kubernetes.client.CoreV1Api()
@@ -295,15 +434,24 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
             }]
         }
     
-    # Generate unique branch name
-    timestamp = datetime.now().strftime("%Y%m%d%H%M")
-    branch_name = f"vpa-update-{name}-{timestamp}"
+    # Check if a pull request already exists from branch_name to base_branch
+    pr_exists, pr_data = check_pull_request_exists(git_repo, branch_name, base_branch, git_token)
     
-    # Clone repository and create patch
+    # Clone repository and update/create patch file
     try:
+        # Clone the repository first
         repo_dir = git_clone(git_repo, git_token)
-        create_branch(repo_dir, branch_name)
         
+        # Now check if branch exists and get commit count after we have the repo
+        commit_count = 0
+        has_branch = check_branch_exists(repo_dir, branch_name)
+        if has_branch:
+            commit_count = get_commit_count(git_repo, branch_name, git_token)
+        
+        # Checkout or create the branch
+        create_or_checkout_branch(repo_dir, branch_name)
+        
+        # Create/update the patch file with the naming convention
         patch_file = create_patch_file(repo_dir, git_path, target_resource, resources)
         
         # Commit message details
@@ -313,11 +461,17 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
         
         commit_message = f"Update {target_kind}/{target_name} resource limits based on VPA recommendation"
         
+        # Commit and push changes
         git_commit_and_push(repo_dir, branch_name, commit_message)
         
-        # Create pull request
-        pr_title = f"Resource update for {target_ns}/{target_kind}/{target_name}"
-        pr_body = f"""
+        # Update commit count after the push
+        commit_count = get_commit_count(git_repo, branch_name, git_token)
+        
+        pr_status = {}
+        # Create a pull request if one doesn't exist
+        if not pr_exists:
+            pr_title = f"Resource update for {target_ns}/{target_kind}/{target_name} from VPA recommendations"
+            pr_body = f"""
 This PR was automatically generated by the VPA Recommender operator.
 
 It updates the resource requests and limits for {target_kind} `{target_name}` in namespace `{target_ns}` 
@@ -326,24 +480,41 @@ based on the recommendations from VPA `{vpa_name}` in namespace `{vpa_namespace}
 New recommended values:
 - CPU request: {resources.get('cpu', 'not updated')}
 - Memory request: {resources.get('memory', 'not updated')}
-- CPU limit: {resources.get('cpuLimit', resources.get('cpu', 'not updated'))}
-- Memory limit: {resources.get('memoryLimit', resources.get('memory', 'not updated'))}
 """
-        
-        pr_url = create_pull_request(
-            repo_dir, git_repo, branch_name, git_token, pr_title, pr_body
-        )
+            
+            pr_data = create_pull_request(
+                git_repo, branch_name, base_branch, git_token, pr_title, pr_body
+            )
+            
+            pr_status = {
+                'url': pr_data.get('url'),
+                'number': pr_data.get('number'),
+                'created_at': pr_data.get('created_at'),
+                'commits': commit_count
+            }
+        else:
+            # PR already exists, just update status
+            pr_status = {
+                'url': pr_data.get('url'),
+                'number': pr_data.get('number'),
+                'created_at': pr_data.get('created_at'),
+                'commits': commit_count
+            }
         
         # Update status
         return {
             'lastRecommendation': resources,
-            'lastPRUrl': pr_url,
-            'lastSuccessfulRunTime': datetime.now().isoformat(),
+            'lastPatch': {
+                'time': datetime.now().isoformat(),
+                'path': os.path.basename(patch_file),
+                'target': f"{target_kind}/{target_name}"
+            },
+            'pullRequest': pr_status,
             'conditions': [{
                 'type': 'Recommended',
                 'status': 'True',
-                'reason': 'PRCreated',
-                'message': f'Successfully created PR: {pr_url}',
+                'reason': 'PatchCreated',
+                'message': f'Successfully created/updated patch and {"updated" if pr_exists else "created"} PR',
                 'lastTransitionTime': datetime.now().isoformat()
             }]
         }
