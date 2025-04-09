@@ -3,11 +3,12 @@ kind: Kustomization
 
 resources:
 - deployment.yaml
+- vpa.yaml
 
-patchesJson6902:
-- target:
+patches:
+- path: patches/resource-patch.yaml
+  target:
     group: apps
-    version: v1
     kind: Deployment
     name: example-app
-  path: patches/resource-patch.yaml
+    version: v1

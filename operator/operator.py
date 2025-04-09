@@ -26,20 +26,38 @@ def git_clone(repo_url: str, auth_token: str, branch: str = "main") -> str:
     repo_owner = parts[-2]
     repo_name = parts[-1]
     
+    # Strip any whitespace or newline characters from token
+    auth_token = auth_token.strip()
+    
     # Use token for authentication
     auth_url = f"https://{auth_token}@github.com/{repo_owner}/{repo_name}.git"
     
     try:
+        logger.info(f"Cloning repository {repo_url}...")
+        # Try without specifying branch first (in case branch doesn't exist)
         subprocess.run(
-            ["git", "clone", "--branch", branch, auth_url, repo_dir],
+            ["git", "clone", auth_url, repo_dir],
             check=True, 
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
+        
+        # Then checkout the specified branch if it exists
+        try:
+            subprocess.run(
+                ["git", "-C", repo_dir, "checkout", branch],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+        except subprocess.CalledProcessError:
+            logger.warning(f"Branch {branch} not found, using default branch")
+            
         logger.info(f"Successfully cloned repository {repo_url}")
         return repo_dir
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to clone repository: {e}")
+        error_output = e.stderr.decode('utf-8') if e.stderr else "No error output"
+        logger.error(f"Failed to clone repository: {e}, Error output: {error_output}")
         raise kopf.PermanentError(f"Failed to clone git repository: {e}")
 
 def create_branch(repo_dir: str, branch_name: str) -> None:
@@ -80,14 +98,6 @@ def create_patch_file(repo_dir: str, git_path: str, target_resource: Dict[str, A
             'op': 'add',
             'path': f"/spec/template/spec/containers/{container_index}/resources/requests/cpu",
             'value': resources['cpu']
-        })
-        
-        # CPU limit patch (typically 2x request)
-        cpu_limit = resources.get('cpuLimit', resources['cpu'])
-        patches.append({
-            'op': 'add',
-            'path': f"/spec/template/spec/containers/{container_index}/resources/limits/cpu",
-            'value': cpu_limit
         })
     
     # Memory request patch
@@ -199,6 +209,7 @@ def create_pull_request(repo_dir: str, repo_url: str, branch_name: str, auth_tok
         logger.error(f"Failed to create pull request: {e}")
         raise kopf.PermanentError(f"Failed to create pull request: {e}")
 
+# Add error handling for missing VPA resources
 def get_vpa_recommendation(name: str, namespace: str) -> Dict[str, str]:
     """Get recommendations from a VPA resource."""
     api = kubernetes.client.CustomObjectsApi()
@@ -232,12 +243,17 @@ def get_vpa_recommendation(name: str, namespace: str) -> Dict[str, str]:
         logger.info(f"Retrieved recommendations: {resources}")
         return resources
     except kubernetes.client.rest.ApiException as e:
-        logger.error(f"Failed to get VPA: {e}")
-        raise kopf.TemporaryError(f"Failed to get VPA: {e}", delay=300)
+        if e.status == 404:
+            logger.error(f"VPA {name} not found in namespace {namespace}. Make sure the VPA exists and has recommendations.")
+            # Return empty dict instead of raising, so we don't trigger retries for a resource that doesn't exist
+            return {}
+        else:
+            logger.error(f"Failed to get VPA: {e}")
+            raise kopf.TemporaryError(f"Failed to get VPA: {e}", delay=300)
 
 @kopf.on.create('recommander.k8s.io', 'v1', 'vparecommenders')
 @kopf.on.update('recommander.k8s.io', 'v1', 'vparecommenders')
-@kopf.on.timer('recommander.k8s.io', 'v1', 'vparecommenders', interval=3600)  # Run every hour
+@kopf.on.timer('recommander.k8s.io', 'v1', 'vparecommenders', interval=3600, idle=20)  # Run every hour, specify idle time
 async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
     """Handler for processing VPA recommendations and creating patches."""
     name = meta.get('name')
@@ -256,6 +272,9 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
     try:
         secret = core_v1_api.read_namespaced_secret(name=secret_name, namespace=namespace)
         git_token = base64.b64decode(secret.data.get('token')).decode('utf-8')
+        # Strip any whitespace or newlines
+        git_token = git_token.strip()
+        logger.debug(f"Retrieved token (length: {len(git_token)})")
     except kubernetes.client.rest.ApiException as e:
         logger.error(f"Failed to get secret {secret_name}: {e}")
         raise kopf.PermanentError(f"Failed to get git secret: {e}")
@@ -263,7 +282,18 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
     # Get VPA recommendations
     resources = get_vpa_recommendation(vpa_name, vpa_namespace)
     if not resources:
-        return {'lastRecommendation': {}, 'status': 'NoRecommendation'}
+        logger.info(f"No recommendations available for VPA {vpa_name} in namespace {vpa_namespace}")
+        return {
+            'lastRecommendation': {},
+            'status': 'NoRecommendation',
+            'conditions': [{
+                'type': 'Recommended',
+                'status': 'False',
+                'reason': 'NoRecommendations',
+                'message': f'No recommendations available for VPA {vpa_name}',
+                'lastTransitionTime': datetime.now().isoformat()
+            }]
+        }
     
     # Generate unique branch name
     timestamp = datetime.now().strftime("%Y%m%d%H%M")

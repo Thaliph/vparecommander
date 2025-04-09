@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: example-app
+  namespace: default
 spec:
   replicas: 1
   selector:
@@ -15,7 +16,6 @@ spec:
       containers:
       - name: main
         image: nginx:latest
-        # Note: No resources defined initially - will be patched by VPARecommender
         resources:
           requests:
             cpu: 100m

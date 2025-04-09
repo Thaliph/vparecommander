@@ -5,7 +5,8 @@ metadata:
   namespace: vpa-recommender
 type: Opaque
 data:
-  token: BASE64_ENCODED_GITHUB_TOKEN  # You need to replace this with your actual token
+  # Fixed token without newlines
+  token: TOKEN
 
 ---
 apiVersion: recommander.k8s.io/v1
@@ -14,13 +15,13 @@ metadata:
   name: example-recommender
   namespace: vpa-recommender
 spec:
-  vpaName: my-app-vpa
+  vpaName: example-app-vpa  # Updated to match the VPA name
   vpaNamespace: default
-  gitRepo: "https://github.com/yourorg/your-repo.git"
-  gitPath: "kustomize-configs"
+  gitRepo: "https://github.com/Thaliph/vparecommander.git"
+  gitPath: "examples/kustomize-example"
   targetResource:
     kind: Deployment
-    name: my-app
+    name: example-app  # Updated to match the deployment name
     namespace: default
     containerIndex: 0
   secretRef: git-credentials

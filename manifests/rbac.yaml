@@ -11,8 +11,8 @@ metadata:
   name: vpa-recommender-operator
 rules:
 - apiGroups: [""]
-  resources: ["pods", "secrets", "configmaps"]
-  verbs: ["get", "list", "watch"]
+  resources: ["pods", "secrets", "configmaps", "events"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
 - apiGroups: ["recommander.k8s.io"]
   resources: ["vparecommenders"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
