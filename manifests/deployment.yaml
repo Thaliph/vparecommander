@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vpa-recommender
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vpa-recommender-operator
+  namespace: vpa-recommender
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpa-recommender-operator
+  template:
+    metadata:
+      labels:
+        app: vpa-recommender-operator
+    spec:
+      serviceAccountName: vpa-recommender-operator
+      containers:
+      - name: operator
+        image: vpa-recommender-operator:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"

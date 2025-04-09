@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vpa-recommender-operator
+  namespace: vpa-recommender
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vpa-recommender-operator
+rules:
+- apiGroups: [""]
+  resources: ["pods", "secrets", "configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["recommander.k8s.io"]
+  resources: ["vparecommenders"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["recommander.k8s.io"]
+  resources: ["vparecommenders/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["autoscaling.k8s.io"]
+  resources: ["verticalpodautoscalers"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vpa-recommender-operator
+subjects:
+- kind: ServiceAccount
+  name: vpa-recommender-operator
+  namespace: vpa-recommender
+roleRef:
+  kind: ClusterRole
+  name: vpa-recommender-operator
+  apiGroup: rbac.authorization.k8s.io

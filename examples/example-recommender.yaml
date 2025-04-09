@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: git-credentials
+  namespace: vpa-recommender
+type: Opaque
+data:
+  token: BASE64_ENCODED_GITHUB_TOKEN  # You need to replace this with your actual token
+
+---
+apiVersion: recommander.k8s.io/v1
+kind: VPARecommender
+metadata:
+  name: example-recommender
+  namespace: vpa-recommender
+spec:
+  vpaName: my-app-vpa
+  vpaNamespace: default
+  gitRepo: "https://github.com/yourorg/your-repo.git"
+  gitPath: "kustomize-configs"
+  targetResource:
+    kind: Deployment
+    name: my-app
+    namespace: default
+    containerIndex: 0
+  secretRef: git-credentials
