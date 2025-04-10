@@ -389,7 +389,7 @@ def get_vpa_recommendation(name: str, namespace: str) -> Dict[str, str]:
 @kopf.on.create('recommander.k8s.io', 'v1', 'vparecommenders')
 @kopf.on.update('recommander.k8s.io', 'v1', 'vparecommenders')
 @kopf.on.timer('recommander.k8s.io', 'v1', 'vparecommenders', interval=3600, idle=20)  # Run every hour, specify idle time
-async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
+async def recommend_resources(spec, meta, namespace, logger, **kwargs):
     """Handler for processing VPA recommendations and creating patches."""
     name = meta.get('name')
     logger.info(f"Processing VPARecommender {name}")
@@ -422,7 +422,7 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
     resources = get_vpa_recommendation(vpa_name, vpa_namespace)
     if not resources:
         logger.info(f"No recommendations available for VPA {vpa_name} in namespace {vpa_namespace}")
-        return {
+        status_data = {
             'lastRecommendation': {},
             'status': 'NoRecommendation',
             'conditions': [{
@@ -433,6 +433,8 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
                 'lastTransitionTime': datetime.now().isoformat()
             }]
         }
+        await update_status(name, namespace, status_data)
+        return
     
     # Check if a pull request already exists from branch_name to base_branch
     pr_exists, pr_data = check_pull_request_exists(git_repo, branch_name, base_branch, git_token)
@@ -445,8 +447,15 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
         # Now check if branch exists and get commit count after we have the repo
         commit_count = 0
         has_branch = check_branch_exists(repo_dir, branch_name)
+        
+        # Get commit count if the branch exists
         if has_branch:
-            commit_count = get_commit_count(git_repo, branch_name, git_token)
+            try:
+                commit_count = get_commit_count(git_repo, branch_name, git_token)
+            except Exception as e:
+                logger.warning(f"Failed to get commit count: {e}")
+                # Continue even if we can't get commit count
+                commit_count = 0
         
         # Checkout or create the branch
         create_or_checkout_branch(repo_dir, branch_name)
@@ -465,10 +474,13 @@ async def recommend_resources(spec, meta, status, namespace, logger, **kwargs):
         git_commit_and_push(repo_dir, branch_name, commit_message)
         
         # Update commit count after the push
-        commit_count = get_commit_count(git_repo, branch_name, git_token)
+        try:
+            commit_count = get_commit_count(git_repo, branch_name, git_token)
+        except Exception as e:
+            logger.warning(f"Failed to get updated commit count: {e}")
         
+        # Create pull request if one doesn't exist
         pr_status = {}
-        # Create a pull request if one doesn't exist
         if not pr_exists:
             pr_title = f"Resource update for {target_ns}/{target_kind}/{target_name} from VPA recommendations"
             pr_body = f"""
@@ -502,7 +514,7 @@ New recommended values:
             }
         
         # Update status
-        return {
+        status_data = {
             'lastRecommendation': resources,
             'lastPatch': {
                 'time': datetime.now().isoformat(),
@@ -518,9 +530,14 @@ New recommended values:
                 'lastTransitionTime': datetime.now().isoformat()
             }]
         }
+        
+        # Use our separate function to update the status
+        await update_status(name, namespace, status_data)
+        
     except Exception as e:
         logger.exception(f"Failed to process VPA recommendation: {str(e)}")
-        return {
+        # Still update the status with the error
+        status_data = {
             'lastRecommendation': resources,
             'conditions': [{
                 'type': 'Recommended',
@@ -530,3 +547,43 @@ New recommended values:
                 'lastTransitionTime': datetime.now().isoformat()
             }]
         }
+        await update_status(name, namespace, status_data)
+
+async def update_status(name: str, namespace: str, status_data: Dict) -> None:
+    """Update the status of the VPARecommender CR."""
+    api = kubernetes.client.CustomObjectsApi()
+    
+    try:
+        # First check if the resource still exists
+        try:
+            api.get_namespaced_custom_object(
+                group="recommander.k8s.io",
+                version="v1",
+                namespace=namespace,
+                plural="vparecommenders",
+                name=name
+            )
+        except kubernetes.client.rest.ApiException as e:
+            if e.status == 404:
+                logger.warning(f"Resource {namespace}/{name} not found, skipping status update")
+                return
+            raise  # Re-raise for other API errors
+        
+        # If resource exists, update its status
+        api.patch_namespaced_custom_object_status(
+            group="recommander.k8s.io",
+            version="v1",
+            namespace=namespace,
+            plural="vparecommenders",
+            name=name,
+            body={"status": status_data}
+        )
+        logger.info(f"Successfully updated status for {namespace}/{name}")
+    except kubernetes.client.rest.ApiException as e:
+        if e.status == 404:
+            # Resource was deleted between our check and the patch - just log and continue
+            logger.warning(f"Resource {namespace}/{name} not found during status update, it may have been deleted")
+        else:
+            logger.error(f"Failed to update status: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error updating status: {e}")
