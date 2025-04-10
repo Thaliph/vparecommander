@@ -11,6 +11,7 @@ from datetime import datetime
 import subprocess
 import logging
 import re
+import asyncio  # Add this import
 from typing import Dict, Any, Tuple, List, Optional
 
 # Configure logging
@@ -550,40 +551,53 @@ New recommended values:
         await update_status(name, namespace, status_data)
 
 async def update_status(name: str, namespace: str, status_data: Dict) -> None:
-    """Update the status of the VPARecommender CR."""
+    """Update the status of the VPARecommender CR with better error handling."""
     api = kubernetes.client.CustomObjectsApi()
     
     try:
-        # First check if the resource still exists
+        # Try to patch the status directly, with a more robust approach
         try:
-            api.get_namespaced_custom_object(
+            # Use strategic merge patch type for more reliable updates
+            api.patch_namespaced_custom_object_status(
                 group="recommander.k8s.io",
                 version="v1",
                 namespace=namespace,
                 plural="vparecommenders",
-                name=name
+                name=name,
+                body={"status": status_data},
+                _content_type="application/merge-patch+json"  # Use merge patch for better handling
             )
+            logger.info(f"Successfully updated status for {namespace}/{name}")
         except kubernetes.client.rest.ApiException as e:
             if e.status == 404:
-                logger.warning(f"Resource {namespace}/{name} not found, skipping status update")
-                return
-            raise  # Re-raise for other API errors
-        
-        # If resource exists, update its status
-        api.patch_namespaced_custom_object_status(
-            group="recommander.k8s.io",
-            version="v1",
-            namespace=namespace,
-            plural="vparecommenders",
-            name=name,
-            body={"status": status_data}
-        )
-        logger.info(f"Successfully updated status for {namespace}/{name}")
-    except kubernetes.client.rest.ApiException as e:
-        if e.status == 404:
-            # Resource was deleted between our check and the patch - just log and continue
-            logger.warning(f"Resource {namespace}/{name} not found during status update, it may have been deleted")
-        else:
-            logger.error(f"Failed to update status: {e}")
+                # Check if the resource actually exists
+                try:
+                    api.get_namespaced_custom_object(
+                        group="recommander.k8s.io",
+                        version="v1",
+                        namespace=namespace,
+                        plural="vparecommenders",
+                        name=name
+                    )
+                    # If we get here, the resource exists but we still got a 404 on status update
+                    # This could be a race condition, so retry with a slight delay
+                    logger.warning(f"Resource {namespace}/{name} exists but status update returned 404, retrying...")
+                    await asyncio.sleep(1)  # Add a small delay
+                    api.patch_namespaced_custom_object_status(
+                        group="recommander.k8s.io",
+                        version="v1",
+                        namespace=namespace,
+                        plural="vparecommenders",
+                        name=name,
+                        body={"status": status_data},
+                        _content_type="application/merge-patch+json"
+                    )
+                    logger.info(f"Successfully updated status for {namespace}/{name} on retry")
+                except kubernetes.client.rest.ApiException:
+                    # Resource truly doesn't exist
+                    logger.warning(f"Resource {namespace}/{name} not found, skipping status update")
+            else:
+                # For other API errors, log them but don't fail the handler
+                logger.error(f"Failed to update status: {e}")
     except Exception as e:
-        logger.error(f"Unexpected error updating status: {e}")
+        logger.error(f"Unexpected error updating status: {str(e)}")

@@ -1,3 +1,4 @@
 kopf==1.36.0
 kubernetes==26.1.0
-pyyaml==6.0
+# Use wheel version for better cross-platform compatibility
+pyyaml>=6.0,<7.0
